@@ -10,14 +10,14 @@ class graph():
     """
     现在类里头定义好CERES的类型（graph_type)以及存储路径(result_pth)
     """
-    def __init__(self, graph_type, result_pth):
+    def __init__(self, graph_type):
         self.gt = graph_type
-        self.pth = result_pth
         self.H8shape = [] #葵花图幅大小
         self.CERESshape=[] #CERES图幅大小
         self.H8fns=[]
         self.CERESfns=[]
         self.Smokefns=[]
+
     def load_H8(self,special_day = None):
         """
         加载'E:\SmokeDetection\source\semi-supervised learning\new_new_data'中所有的葵花数据，除了0808，special_day可以只读取那一天的数据
@@ -41,6 +41,8 @@ class graph():
                 time = fn.split('\\')[-1][:-4]
                 if not (os.path.exists(r'E:\Radiative Effect\{}\{}\{}.tif'.format(self.gt,date,time)) and os.path.exists(r'E:\SmokeDetection\source\semi-supervised learning\pixel classification results\Noon256batchsize3e4lrBN050Dropout\{}\{}.tif'.format(date,time))):
                     self.H8fns.remove(fn)
+                elif not time[0]=='0' or time[1]=='9':
+                    self.H8fns.remove(fn)
             H8_datasets = []
             for fn in tqdm(self.H8fns):
                 ary = gdal.Open(fn).ReadAsArray()
@@ -61,6 +63,8 @@ class graph():
             date = fn.split('\\')[-2]
             time = fn.split('\\')[-1][:-4]
             if not (os.path.exists(r'E:\SmokeDetection\source\semi-supervised learning\new_new_data\{}\{}.tif'.format(date,time)) and os.path.exists(r'E:\SmokeDetection\source\semi-supervised learning\pixel classification results\Noon256batchsize3e4lrBN050Dropout\{}\{}.tif'.format(date, time))):
+                self.CERESfns.remove(fn)
+            elif not time[0]=='0' or time[1]=='9':
                 self.CERESfns.remove(fn)
 
         if len(self.CERESfns)==0:
@@ -89,6 +93,9 @@ class graph():
                 time = fn.split('\\')[-1][:-4]
                 if not (os.path.exists(r'E:\Radiative Effect\{}\{}\{}.tif'.format(self.gt,date,time)) and os.path.exists(r'E:\SmokeDetection\source\semi-supervised learning\new_new_data\{}\{}.tif'.format(date,time))):
                     self.Smokefns.remove(fn)
+                elif not time[0] == '0' or time[1] == '9':
+
+                    self.Smokefns.remove(fn)
             Smoke_datasets = []
             for fn in tqdm(self.Smokefns):
                 Smoke_datasets.append(gdal.Open(fn).ReadAsArray())
@@ -100,19 +107,31 @@ class graph():
         """
         叠加烟检测数据和葵花数据的云结果，得到一个相同分辨率的像元类别结果，海为0，地为1,烟为3，云为4。烟的优先级在云上，云不盖烟。
         """
-        classification = []
-        for i,temp in enumerate(himawari_datasets):
-            if kind == 'smoke': label = temp[-1] / 255  # 这里的label得改掉，不能是最后一个通道了
-            if kind == 'cloud':
-                label = np.where(temp[0, :, :] > 0.2, 1, 0)
-                label = np.where(temp[-1, :, :] == 1, 0, label)
-
-
-    def sample(self):
+        try:
+            land_sea_label = gdal.Open(r'E:\Radiative Effect\landsea501_582.tif').ReadAsArray()  # 海洋陆地标签
+            classification = []
+            for i,temp in enumerate(himawari_datasets):
+                seaLand = np.copy(land_sea_label)
+                seaLandCloud = np.where(temp[0, :, :] > 0.2, 4, seaLand) # 设云
+                seaLandCloudSmoke = np.where(smoke_datasets[i]==255, 3, seaLandCloud) # 设烟
+                classification.append(seaLandCloudSmoke)
+            return classification
+        except:
+            raise ImportError('load_classification出错误了，很可能是文件加载的问题，看看land_sea_label的文件还在吗，还是[501,582]的shape吗')
+    def sample(self,classification, CERES_dataset, row,col):
         """
-        这是最恶心的代码，要定位到具体的行列号，然后采样对应的CERES数据和Classification数据
+        这是最恶心的代码，要定位到具体的行列号，然后采样对应的CERES数据和Classification数据,row和col是采样区左上角的点，50、50的像元跨度
         """
-        pass
+        #row,col =  300,358 # 这里写索引
+        graph_element_CERES = []
+        graph_element_classification=[]
+        for i,c in enumerate(classification): #写到这里强迫症犯了，写不下去，为了让自己写下去就随便命名了
+            test = CERES_dataset[i][row:row+50,col:col+50]
+            if not round(test.sum()/test.mean()) == test.shape[0]*test.shape[1]:
+                raise ValueError('{}数据错啦！切片里的值不是同一个值！检测一下行列号'.format(self.CERESfns[i]))
+            graph_element_CERES.append(CERES_dataset[i][row:row+50,col:col+50])
+            graph_element_classification.append(classification[i][row:row+50,col:col+50])
+        return graph_element_classification, graph_element_CERES
 
     def trace_single(self):
         """
@@ -120,18 +139,88 @@ class graph():
         """
         pass
 
-    def trace_whole(self):
+    def trace_whole(self,graph_element_classification,graph_element_CERES):
         """
-        把这28天都找了出图
+        把这28天都找了出图，输出的是按照0100-0800排列好的CERES平均数据，以及分类数据，分类数据从左到右海地烟云
         """
-        pass
+        obj_origin = glob.glob(r'E:\SmokeDetection\source\semi-supervised learning\new_new_data\0818\*.tif')[4:]  # 先找一个日子，把这个日子的所有文件当做基准，去掉从00:40开始
+
+        ceres_totall = []
+        class_totall = []
+        for obj in obj_origin:
+            utc = obj[-8:-4]
+            same_time_files = glob.glob(r'E:\SmokeDetection\source\semi-supervised learning\new_new_data\*\{}.tif'.format(utc))
+            idx= []
+            for file in same_time_files:
+                try:
+                    i=self.H8fns.index(file)
+                    idx.append(i)
+                except:
+                    '随便写一点啥'
+            ceres_time = 0
+            for j in idx:
+                ceres_time+=graph_element_CERES[j][0,0]
+            ceres_totall.append(ceres_time/len(idx))
+            num_smoke, num_cloud, num_land, num_sea = 0,0,0,0 #烟云地海 四个类别每个时刻的数值 海为0，地为1,烟为3，云为4
+            for k in idx:
+                num_smoke += np.where(graph_element_classification[k]==3,1,0).sum()
+                num_cloud += np.where(graph_element_classification[k]==4,1,0).sum()
+                num_land+= np.where(graph_element_classification[k]==1,1,0).sum()
+                num_sea+= np.where(graph_element_classification[k]==0,1,0).sum()
+            if not num_sea+num_land+num_cloud+num_smoke==2500*len(idx):
+                raise ValueError('哪里出错了呢？导致类别的和不全')
+            class_totall.append([num_sea, num_land, num_smoke, num_cloud])
+        return ceres_totall,class_totall
+    def mk_a_graph(self,ceres_totall,class_totall,result_pth):
+        x_axis = []
+        class_totall = np.array(class_totall)
+        ceres_totall = np.array(ceres_totall)
+        class_hours = []
+        ceres_hours = []
+        for i in range(1,8):# 01：00-07：00，精准时刻是从00：40-07：30
+            x_axis.append('{}:00'.format(i+8))
+            #把每个时刻的整合在1小时里
+            class_hours.append([class_totall[(i-1)*6:i*6,0].sum(),class_totall[(i-1)*6:i*6,1].sum(),class_totall[(i-1)*6:i*6,2].sum(),class_totall[(i-1)*6:i*6,3].sum()])
+            ceres_hours.append(ceres_totall[(i-1)*6:i*6].sum()/6)
+        class_hours = np.array(class_hours)
+        ceres_hours = np.array(ceres_hours)
+        fig ,ax = plt.subplots()
+        ax.bar(x_axis, class_hours[:, 1],label = 'Land')
+        ax.bar(x_axis, class_hours[:,2], bottom=class_hours[:,1], label = 'Smoke')
+        ax.bar(x_axis, class_hours[:, 3], bottom=class_hours[:, 2],label = 'Cloud')
+        ax.set_ylabel('pix_num')
+        plt.legend()
+        # plt.bar(x_axis, class_hours[:, 3], bottom=class_hours[:, 2])
+        #plt.plot(x_axis,ceres_hours)
+        ax2 = plt.twinx()
+        ax2.plot(x_axis,ceres_hours,color='red')
+        for i in range(7):
+            ax2.text(x_axis[i],ceres_hours[i],'%.0f' % ceres_hours[i],fontdict={'fontsize':14})
+        ax2.set_ylabel('W/m²')
+        plt.title(result_pth.split('\\')[-1][:-4])
+
+        plt.savefig(result_pth)
+        #plt.show()
 
 if __name__ == '__main__':
-    d = graph('adj_sfc_uva_all_1h','12')
-    d.load_CERES()
-    d.load_H8()
-    d.load_Smoke()
-    print(d.Smokefns)
+    d = graph('ini_toa_lw_all_1h') #ini_toa_lw_all_1h |ini_sfc_lw_down_all_1h
+    CERES = d.load_CERES()
+    h8 = d.load_H8()
+    smoke = d.load_Smoke()
+    c = d.load_classification(h8,smoke)
+    # 自定义部分
+    classfication, ceres= d.sample(c,CERES,300,358)
+    c_t,cls_t = d.trace_whole(classfication,ceres)
+    d.mk_a_graph(c_t,cls_t,r'E:\Radiative Effect\Picture\test1_lw_all_300_358.png')
 
-    print(d.H8fns)
-    print(d.CERESfns)
+    classfication, ceres = d.sample(c, CERES, 350, 358)
+    c_t, cls_t = d.trace_whole(classfication, ceres)
+    d.mk_a_graph(c_t, cls_t, r'E:\Radiative Effect\Picture\test1_lw_all_350_358.png')
+
+    classfication, ceres = d.sample(c, CERES, 300, 308)
+    c_t, cls_t = d.trace_whole(classfication, ceres)
+    d.mk_a_graph(c_t, cls_t, r'E:\Radiative Effect\Picture\test1_lw_all_300_308.png')
+
+    classfication, ceres = d.sample(c, CERES, 350, 308)
+    c_t, cls_t = d.trace_whole(classfication, ceres)
+    d.mk_a_graph(c_t, cls_t, r'E:\Radiative Effect\Picture\test1_lw_all_350_308.png')
